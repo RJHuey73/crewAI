@@ -46,7 +46,36 @@ _TRUSTED_SCRIPT_EXECUTION_VALUES = frozenset({"1", "true", "yes"})
 
 
 class FlowScriptExecutionDisabledError(RuntimeError):
-    """Raised when a flow definition tries to execute inline script code."""
+    """Raised when a flow definition tries to execute code without opt-in.
+
+    Covers both ``ScriptAction`` (inline Python source embedded in the flow
+    definition) and ``CodeAction`` (a ``do:`` ref resolved to any importable
+    ``module:qualname`` symbol and invoked directly) -- the two sit on the
+    same trust boundary, since a flow definition an operator did not author
+    themselves can smuggle arbitrary code execution through either one.
+    """
+
+
+def _ensure_flow_execution_allowed() -> None:
+    """Raise unless the operator explicitly opted into flow code execution.
+
+    Both `ScriptAction` and `CodeAction` gate on this exact same check: a
+    shared/downloaded flow definition file can smuggle arbitrary code
+    execution either as inline script source or as a `do:` ref to any
+    importable symbol (e.g. `os:system`), so both require the same explicit
+    opt-in before resolving or invoking anything.
+
+    Raises:
+        FlowScriptExecutionDisabledError: If the opt-in env var is not set
+            to a trusted value.
+    """
+    raw = os.environ.get(_ALLOW_SCRIPT_EXECUTION_ENV_VAR, "")
+    if raw.strip().lower() not in _TRUSTED_SCRIPT_EXECUTION_VALUES:
+        raise FlowScriptExecutionDisabledError(
+            "Flow script execution is disabled by default. "
+            f"Set {_ALLOW_SCRIPT_EXECUTION_ENV_VAR}=1 to enable it only for "
+            "trusted flow definitions."
+        )
 
 
 class _BuiltAction(Protocol):
@@ -79,6 +108,7 @@ class CodeAction:
         )
 
     def _resolve_handler(self) -> Callable[..., Any]:
+        _ensure_flow_execution_allowed()
         ref = self.definition.ref
         target = resolve_ref(ref, field="do")
         if not callable(target):
@@ -231,13 +261,7 @@ class ScriptAction:
         )
 
     def _compile_handler(self) -> Callable[..., Any]:
-        raw = os.environ.get(_ALLOW_SCRIPT_EXECUTION_ENV_VAR, "")
-        if raw.strip().lower() not in _TRUSTED_SCRIPT_EXECUTION_VALUES:
-            raise FlowScriptExecutionDisabledError(
-                "Flow script execution is disabled by default. "
-                f"Set {_ALLOW_SCRIPT_EXECUTION_ENV_VAR}=1 to enable it only for "
-                "trusted flow definitions."
-            )
+        _ensure_flow_execution_allowed()
 
         filename = f"crewai.flow.script.{self.flow._definition.name}"
         module = ast.parse(self.definition.code, filename=filename)

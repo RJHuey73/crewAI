@@ -358,6 +358,15 @@ class SingleStoreSearchTool(BaseTool):
 
         Only SELECT and SHOW statements are allowed for security reasons.
 
+        A statement starting with SELECT/SHOW is not sufficient on its own:
+        SingleStore (like MySQL) supports file-system-touching constructs as
+        clauses within an otherwise read-only-looking statement --
+        ``SELECT ... INTO OUTFILE '/path'`` writes query results to a file on
+        the server, and ``SELECT LOAD_FILE(...)`` reads one -- both bypassing
+        the "read-only" intent of this tool via the DB connection's own
+        privileges. These are rejected regardless of where they appear in the
+        statement, not just as a prefix check.
+
         Args:
             search_query: The SQL query to validate
 
@@ -375,6 +384,17 @@ class SingleStoreSearchTool(BaseTool):
                 False,
                 "Only SELECT and SHOW queries are supported for security reasons.",
             )
+
+        # Reject file-system-touching constructs even when the statement
+        # starts with SELECT/SHOW -- these are suffix/embedded clauses, not
+        # prefixes, so they must be searched for anywhere in the query.
+        for forbidden in ("into outfile", "into dumpfile", "load_file("):
+            if forbidden in query_lower:
+                return (
+                    False,
+                    "Queries that read or write files on the server "
+                    f"({forbidden.upper()}) are not supported for security reasons.",
+                )
 
         return True, "Valid query"
 

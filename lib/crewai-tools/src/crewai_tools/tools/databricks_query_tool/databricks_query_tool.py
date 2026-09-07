@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from typing import TYPE_CHECKING, Any, TypeGuard, TypedDict
 
@@ -34,6 +35,48 @@ def _has_data_array(result: Any) -> TypeGuard[Any]:
     )
 
 
+# Read-only statement keywords this tool is permitted to execute. Databricks
+# SQL DDL/DML (DROP, DELETE, INSERT, UPDATE, MERGE, ...) is deliberately not
+# in this set: an agent's `query` input can be steered by prompt-injected
+# content in retrieved data, and this tool must not let that turn into a
+# destructive statement.
+_ALLOWED_STATEMENT_KEYWORDS = frozenset(
+    {"select", "show", "describe", "desc", "explain"}
+)
+
+_LEADING_LINE_COMMENT_RE = re.compile(r"\A--[^\n]*\n?")
+_LEADING_BLOCK_COMMENT_RE = re.compile(r"\A/\*.*?\*/", re.DOTALL)
+_LEADING_KEYWORD_RE = re.compile(r"[A-Za-z]+")
+
+
+def _leading_sql_keyword(query: str) -> str:
+    """Return the first SQL keyword in ``query``, skipping leading whitespace/comments.
+
+    Args:
+        query: The raw SQL text to inspect.
+
+    Returns:
+        The lowercased leading keyword (e.g. ``"select"``), or an empty
+        string if none can be found (e.g. the query is empty, or made up
+        entirely of whitespace/comments).
+    """
+    remaining = query
+    while True:
+        remaining = remaining.lstrip()
+        line_comment_match = _LEADING_LINE_COMMENT_RE.match(remaining)
+        if line_comment_match:
+            remaining = remaining[line_comment_match.end() :]
+            continue
+        block_comment_match = _LEADING_BLOCK_COMMENT_RE.match(remaining)
+        if block_comment_match:
+            remaining = remaining[block_comment_match.end() :]
+            continue
+        break
+
+    keyword_match = _LEADING_KEYWORD_RE.match(remaining)
+    return keyword_match.group(0).lower() if keyword_match else ""
+
+
 class DatabricksQueryToolSchema(BaseModel):
     """Input schema for DatabricksQueryTool."""
 
@@ -62,6 +105,18 @@ class DatabricksQueryToolSchema(BaseModel):
         # Ensure the query is not empty
         if not self.query or not self.query.strip():
             raise ValueError("Query cannot be empty")
+
+        # Only allow read-only statements. `query` is LLM/agent-supplied and
+        # can be steered by prompt-injected content in retrieved data, so a
+        # non-read-only leading keyword (DROP, DELETE, INSERT, UPDATE, ...)
+        # is rejected outright rather than executed.
+        leading_keyword = _leading_sql_keyword(self.query)
+        if leading_keyword not in _ALLOWED_STATEMENT_KEYWORDS:
+            raise ValueError(
+                "Only read-only statements are permitted: the query must "
+                "start with SELECT, SHOW, DESCRIBE/DESC, or EXPLAIN "
+                f"(got a statement starting with {leading_keyword or '<empty>'!r})."
+            )
 
         # Add a LIMIT clause to the query if row_limit is provided and query doesn't have one
         if self.row_limit and "limit" not in self.query.lower():

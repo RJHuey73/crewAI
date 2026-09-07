@@ -32,6 +32,25 @@ from crewai.tools import BaseTool
 from crewai.types.streaming import FlowStreamingOutput
 
 
+_ALLOW_FLOW_SCRIPT_EXECUTION_ENV_VAR = "CREWAI_ALLOW_FLOW_SCRIPT_EXECUTION"
+
+
+@pytest.fixture(autouse=True)
+def _allow_flow_code_and_script_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the CodeAction/ScriptAction opt-in on for this module.
+
+    This module's own fixtures reference flow methods via `do:` refs
+    (CodeAction) and inline `code:` blocks (ScriptAction) extensively --
+    they're this repo's own trusted test fixtures, sitting on the same
+    trust boundary `CREWAI_ALLOW_FLOW_SCRIPT_EXECUTION=1` gates in
+    production. Tests that specifically exercise the "refuses without
+    opt-in" behavior override this by calling
+    `monkeypatch.delenv(_ALLOW_FLOW_SCRIPT_EXECUTION_ENV_VAR, raising=False)`
+    themselves before building the flow.
+    """
+    monkeypatch.setenv(_ALLOW_FLOW_SCRIPT_EXECUTION_ENV_VAR, "1")
+
+
 class StaticSearchTool(BaseTool):
     name: str = "StaticSearchTool"
     description: str = "Returns a deterministic search result."
@@ -1565,7 +1584,9 @@ methods:
     assert flow.kickoff(inputs={"rows": ["a", "b"]}) == ["async:a", "async:b"]
 
 
-def test_script_action_requires_explicit_opt_in():
+def test_script_action_requires_explicit_opt_in(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv(_ALLOW_FLOW_SCRIPT_EXECUTION_ENV_VAR, raising=False)
+
     yaml_str = """
 schema: crewai.flow/v1
 name: ScriptFlow
@@ -1584,6 +1605,53 @@ methods:
     ) as exc_info:
         Flow.from_definition(FlowDefinition.from_declaration(contents=yaml_str))
     assert "methods with unresolvable actions" not in str(exc_info.value)
+
+
+def test_code_action_requires_explicit_opt_in(monkeypatch: pytest.MonkeyPatch):
+    """CodeAction sits on the same trust boundary as ScriptAction: a `do:`
+    ref can resolve to any importable symbol (e.g. `os:system`), so it must
+    refuse to resolve/invoke anything without the same explicit opt-in.
+    """
+    monkeypatch.delenv(_ALLOW_FLOW_SCRIPT_EXECUTION_ENV_VAR, raising=False)
+
+    yaml_str = f"""
+schema: crewai.flow/v1
+name: CodeGateFlow
+methods:
+  begin:
+    do:
+      call: code
+      ref: {__name__}:ChainFlow.begin
+    start: true
+"""
+
+    with pytest.raises(
+        FlowScriptExecutionDisabledError,
+        match="CREWAI_ALLOW_FLOW_SCRIPT_EXECUTION=1",
+    ) as exc_info:
+        Flow.from_definition(FlowDefinition.from_declaration(contents=yaml_str))
+    assert "methods with unresolvable actions" not in str(exc_info.value)
+
+
+def test_code_action_runs_with_explicit_opt_in(monkeypatch: pytest.MonkeyPatch):
+    """The same flow that's refused above must run once opted in."""
+    monkeypatch.setenv(_ALLOW_FLOW_SCRIPT_EXECUTION_ENV_VAR, "1")
+
+    yaml_str = f"""
+schema: crewai.flow/v1
+name: CodeGateFlow
+methods:
+  begin:
+    do:
+      call: code
+      ref: {__name__}:ChainFlow.begin
+    start: true
+"""
+
+    flow = Flow.from_definition(FlowDefinition.from_declaration(contents=yaml_str))
+
+    assert flow.kickoff() == "hello"
+    assert flow.state["begin_ran"] is True
 
 
 def test_script_action_runs_python_imports_mutates_state_and_returns_value(
