@@ -220,6 +220,45 @@ class TestSingleStoreSearchTool:
         assert valid is False
         assert "Only SELECT and SHOW queries are supported" in message
 
+    def test_query_validation_into_outfile_denied(self, sample_table_setup):
+        """A SELECT starting the statement must not bypass INTO OUTFILE."""
+        tool = SingleStoreSearchTool(host=sample_table_setup, database="test_crewai")
+
+        valid, message = tool._validate_query(
+            "SELECT * FROM employees INTO OUTFILE '/tmp/leak.csv'"
+        )
+        assert valid is False
+        assert "INTO OUTFILE" in message
+
+    def test_query_validation_into_dumpfile_denied(self, sample_table_setup):
+        """A SELECT starting the statement must not bypass INTO DUMPFILE."""
+        tool = SingleStoreSearchTool(host=sample_table_setup, database="test_crewai")
+
+        valid, message = tool._validate_query(
+            "SELECT * FROM employees INTO DUMPFILE '/tmp/leak.bin'"
+        )
+        assert valid is False
+        assert "INTO DUMPFILE" in message
+
+    def test_query_validation_load_file_denied(self, sample_table_setup):
+        """A SELECT starting the statement must not bypass LOAD_FILE()."""
+        tool = SingleStoreSearchTool(host=sample_table_setup, database="test_crewai")
+
+        valid, message = tool._validate_query(
+            "SELECT LOAD_FILE('/etc/passwd')"
+        )
+        assert valid is False
+        assert "LOAD_FILE" in message
+
+    def test_query_validation_into_outfile_case_insensitive(self, sample_table_setup):
+        """The file-clause rejection must not depend on keyword case."""
+        tool = SingleStoreSearchTool(host=sample_table_setup, database="test_crewai")
+
+        valid, _ = tool._validate_query(
+            "select * from employees into outfile '/tmp/leak.csv'"
+        )
+        assert valid is False
+
     def test_query_validation_non_string(self, sample_table_setup):
         """Test that non-string queries are rejected."""
         tool = SingleStoreSearchTool(host=sample_table_setup, database="test_crewai")
